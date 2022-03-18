@@ -1,11 +1,12 @@
+use std::io::Read;
 use std::net::{IpAddr, Ipv4Addr, SocketAddrV4};
 use std::str::FromStr;
 use std::time::{Duration, Instant};
 use std::{env, mem, process, thread};
 
-use pnet::packet::icmp::{self, IcmpType, MutableIcmpPacket};
+use pnet::packet::icmp::{self, IcmpPacket, IcmpType, MutableIcmpPacket};
 use pnet::packet::ip::IpNextHeaderProtocol;
-use pnet::packet::ipv4::{self, MutableIpv4Packet};
+use pnet::packet::ipv4::{self, Ipv4Packet, MutableIpv4Packet};
 use pnet::packet::Packet;
 use regex::Regex;
 use socket2::{Domain, Protocol, Socket, Type};
@@ -33,14 +34,14 @@ fn main() {
 
     // This scope is to spawn a thread which sends ICMP echo requests at regular intervals
     crossbeam::scope(|s| {
+        // Calculate buffer size for packet
+        const ICMP_HEADER_SIZE: usize = MutableIcmpPacket::minimum_packet_size();
+        const ICMP_PACKET_SIZE: usize = ICMP_HEADER_SIZE + IcmpPayload::SIZE;
+        const IP_HDR_SIZE: usize = MutableIpv4Packet::minimum_packet_size();
+        const IP_PACKET_SIZE: usize = ICMP_PACKET_SIZE + IP_HDR_SIZE;
+
         s.spawn(|_| {
             let send_socket = unwrap_result(get_socket());
-
-            // Calculate buffer size for packet
-            const ICMP_HEADER_SIZE: usize = MutableIcmpPacket::minimum_packet_size();
-            const ICMP_PACKET_SIZE: usize = ICMP_HEADER_SIZE + IcmpPayload::SIZE;
-            const IP_HDR_SIZE: usize = MutableIpv4Packet::minimum_packet_size();
-            const IP_PACKET_SIZE: usize = ICMP_PACKET_SIZE + IP_HDR_SIZE;
 
             let mut ip_buf = [0_u8; IP_PACKET_SIZE];
             let mut icmp_buf = [0_u8; ICMP_PACKET_SIZE];
@@ -100,6 +101,29 @@ fn main() {
                 icmp_payload.timestamp = diff as u32;
             }
         });
+
+        // Receive the echo reply packets on the main thread
+        let mut receive_socket = unwrap_result(get_socket());
+
+        let mut recv_buf = [0_u8; IP_PACKET_SIZE];
+        loop {
+            let len = unwrap_result_or_continue!(receive_socket.read(&mut recv_buf));
+            if len < IP_PACKET_SIZE {
+                continue;
+            }
+            let ip_packet = unwrap_option_or_continue!(Ipv4Packet::new(&recv_buf));
+            if ip_packet.get_next_level_protocol() != IpNextHeaderProtocol(ICMP_PROTOCOL) {
+                continue;
+            }
+            if ip_packet.get_destination() != host_addr {
+                continue;
+            }
+            let icmp_packet = unwrap_option_or_continue!(IcmpPacket::new(ip_packet.packet()));
+            if icmp_packet.get_icmp_type() != IcmpType(ICMP_ECHO_REPLY) {
+                continue;
+            }
+            println!("PING from {}", host_addr);
+        }
     })
     .unwrap();
 }
@@ -135,6 +159,31 @@ fn unwrap_result<O>(val: PingResult<O>) -> O {
             std::process::exit(1);
         }
     }
+}
+
+#[macro_export]
+macro_rules! unwrap_result_or_continue {
+    ($expr:expr) => {
+        match $expr {
+            Ok(len) => len,
+            Err(e) => {
+                eprintln!("{}", e);
+                continue;
+            }
+        }
+    };
+}
+
+#[macro_export]
+macro_rules! unwrap_option_or_continue {
+    ($expr:expr) => {
+        match $expr {
+            Some(len) => len,
+            None => {
+                continue;
+            }
+        }
+    };
 }
 
 #[repr(C)]
