@@ -116,11 +116,23 @@ fn main() {
             if ip_packet.get_source() != host_addr {
                 continue;
             }
-            let icmp_packet = unwrap_option_or_continue!(IcmpPacket::new(ip_packet.payload()));
+            let icmp_buf = ip_packet.payload();
+            let icmp_packet = unwrap_option_or_continue!(IcmpPacket::new(icmp_buf));
             if icmp_packet.get_icmp_type() != IcmpType(ICMP_ECHO_REPLY) {
                 continue;
             }
-            println!("PING from {}", host_addr);
+            let icmp_payload = IcmpPayload::from_bytes(icmp_packet.payload());
+            let now = Instant::now();
+            let now_from_start = (now - start).as_millis() as u32;
+            let time_for_reply = now_from_start - icmp_payload.timestamp;
+            println!(
+                "{} bytes from {}: icmp_seq={} ttl={} time={} ms",
+                icmp_buf.len(),
+                host_addr,
+                icmp_payload.seq_num,
+                ip_packet.get_ttl(),
+                time_for_reply,
+            );
         }
     })
     .unwrap();
@@ -197,6 +209,13 @@ impl IcmpPayload {
 
     fn to_bytes(&self) -> [u8; IcmpPayload::SIZE] {
         unsafe { mem::transmute_copy(self) }
+    }
+
+    fn from_bytes(buf: &[u8]) -> Self {
+        assert!(buf.len() == IcmpPayload::SIZE);
+        let mut ob_buf = [0_u8; IcmpPayload::SIZE];
+        ob_buf.copy_from_slice(buf);
+        unsafe { mem::transmute(ob_buf) }
     }
 }
 
