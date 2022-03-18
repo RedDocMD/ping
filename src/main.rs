@@ -19,6 +19,7 @@ const ICMP_ECHO_REPLY: u8 = 0;
 const IPV4_VERSION: u8 = 4;
 const TTL: u8 = 112;
 const ICMP_PROTOCOL: u8 = 1;
+const MAX_PACKET_SIZE: usize = 1600;
 
 fn main() {
     let args: Vec<_> = env::args().collect();
@@ -105,20 +106,17 @@ fn main() {
         // Receive the echo reply packets on the main thread
         let mut receive_socket = unwrap_result(get_socket());
 
-        let mut recv_buf = [0_u8; IP_PACKET_SIZE];
+        let mut recv_buf = [0_u8; MAX_PACKET_SIZE];
         loop {
             let len = unwrap_result_or_continue!(receive_socket.read(&mut recv_buf));
-            if len < IP_PACKET_SIZE {
-                continue;
-            }
-            let ip_packet = unwrap_option_or_continue!(Ipv4Packet::new(&recv_buf));
+            let ip_packet = unwrap_option_or_continue!(Ipv4Packet::new(&recv_buf[..len]));
             if ip_packet.get_next_level_protocol() != IpNextHeaderProtocol(ICMP_PROTOCOL) {
                 continue;
             }
-            if ip_packet.get_destination() != host_addr {
+            if ip_packet.get_source() != host_addr {
                 continue;
             }
-            let icmp_packet = unwrap_option_or_continue!(IcmpPacket::new(ip_packet.packet()));
+            let icmp_packet = unwrap_option_or_continue!(IcmpPacket::new(ip_packet.payload()));
             if icmp_packet.get_icmp_type() != IcmpType(ICMP_ECHO_REPLY) {
                 continue;
             }
