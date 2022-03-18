@@ -1,11 +1,16 @@
+use std::net::{IpAddr, Ipv4Addr};
+use std::str::FromStr;
 use std::time::{Duration, Instant};
-use std::{mem, thread};
+use std::{env, mem, process, thread};
 
 use pnet::packet::icmp::{self, IcmpType, MutableIcmpPacket};
 use pnet::packet::ip::IpNextHeaderProtocol;
 use pnet::packet::ipv4::MutableIpv4Packet;
+use regex::Regex;
 use socket2::{Domain, Protocol, Socket, Type};
 use thiserror::Error;
+use trust_dns_resolver::config::{ResolverConfig, ResolverOpts};
+use trust_dns_resolver::Resolver;
 
 const ICMP_ECHO_REQUEST: u8 = 8;
 const IPV4_VERSION: u8 = 4;
@@ -13,6 +18,14 @@ const TTL: u8 = 8;
 const ICMP_PROTOCOL: u8 = 1;
 
 fn main() {
+    let args: Vec<_> = env::args().collect();
+    if args.len() != 2 {
+        eprintln!("Expected: <hostname|ipv4>");
+        process::exit(1);
+    }
+    let ping_arg = PingArg::new(&args[1]);
+    let host_addr = unwrap_result(ping_arg.to_ipv4());
+
     let start = Instant::now();
     let identifier = rand::random::<u16>();
 
@@ -87,6 +100,15 @@ fn get_socket() -> PingResult<Socket> {
 enum PingError {
     #[error("IO error: {0}")]
     IOError(#[from] std::io::Error),
+
+    #[error("Invalid IP addr: {0}")]
+    InvalidIpv4(#[from] std::net::AddrParseError),
+
+    #[error("Resolve error: {0}")]
+    ResolveError(#[from] trust_dns_resolver::error::ResolveError),
+
+    #[error("Failed to find IPv4 address")]
+    NoIpv4Addr,
 }
 
 type PingResult<O> = Result<O, PingError>;
@@ -114,5 +136,39 @@ impl IcmpPayload {
 
     fn into_bytes(self) -> [u8; IcmpPayload::SIZE] {
         unsafe { mem::transmute(self) }
+    }
+}
+
+#[derive(Debug)]
+enum PingArg<'a> {
+    Host(&'a str),
+    Ip(&'a str),
+}
+
+impl<'a> PingArg<'a> {
+    fn new(arg: &'a str) -> Self {
+        let arg = arg.trim();
+        let ip_re = Regex::new(r"^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$").unwrap();
+        if ip_re.is_match(arg) {
+            PingArg::Ip(arg)
+        } else {
+            PingArg::Host(arg)
+        }
+    }
+
+    fn to_ipv4(&self) -> PingResult<Ipv4Addr> {
+        match self {
+            PingArg::Host(host) => {
+                let resolver = Resolver::new(ResolverConfig::default(), ResolverOpts::default())?;
+                let response = resolver.lookup_ip(*host)?;
+                for ip_addr in response.iter() {
+                    if let IpAddr::V4(ipv4_addr) = ip_addr {
+                        return Ok(ipv4_addr);
+                    }
+                }
+                Err(PingError::NoIpv4Addr)
+            }
+            PingArg::Ip(ip) => Ok(Ipv4Addr::from_str(ip)?),
+        }
     }
 }
