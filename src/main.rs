@@ -1,11 +1,12 @@
-use std::net::{IpAddr, Ipv4Addr};
+use std::net::{IpAddr, Ipv4Addr, SocketAddrV4};
 use std::str::FromStr;
 use std::time::{Duration, Instant};
 use std::{env, mem, process, thread};
 
 use pnet::packet::icmp::{self, IcmpType, MutableIcmpPacket};
 use pnet::packet::ip::IpNextHeaderProtocol;
-use pnet::packet::ipv4::MutableIpv4Packet;
+use pnet::packet::ipv4::{self, MutableIpv4Packet};
+use pnet::packet::Packet;
 use regex::Regex;
 use socket2::{Domain, Protocol, Socket, Type};
 use thiserror::Error;
@@ -13,8 +14,9 @@ use trust_dns_resolver::config::{ResolverConfig, ResolverOpts};
 use trust_dns_resolver::Resolver;
 
 const ICMP_ECHO_REQUEST: u8 = 8;
+const ICMP_ECHO_REPLY: u8 = 0;
 const IPV4_VERSION: u8 = 4;
-const TTL: u8 = 8;
+const TTL: u8 = 112;
 const ICMP_PROTOCOL: u8 = 1;
 
 fn main() {
@@ -46,44 +48,56 @@ fn main() {
             const SLEEP_TIME_SECS: u64 = 1;
             let sleep_time = Duration::from_secs(SLEEP_TIME_SECS);
 
+            let mut icmp_packet = MutableIcmpPacket::new(&mut icmp_buf).unwrap();
+            // Set ICMP fields
+            icmp_packet.set_icmp_type(IcmpType(ICMP_ECHO_REQUEST));
+            let now = Instant::now();
+            let diff = (now - start).as_millis();
+            let mut icmp_payload = IcmpPayload {
+                identifier,
+                seq_num: 0,
+                timestamp: diff as u32,
+            };
+
+            let mut ip_packet = MutableIpv4Packet::new(&mut ip_buf).unwrap();
+            // Set IP fields
+            ip_packet.set_version(IPV4_VERSION);
+            ip_packet.set_header_length((IP_HDR_SIZE / 4) as u8);
+            ip_packet.set_total_length(IP_PACKET_SIZE as u16);
+            ip_packet.set_ttl(TTL);
+            ip_packet.set_next_level_protocol(IpNextHeaderProtocol(ICMP_PROTOCOL));
+            ip_packet.set_destination(host_addr);
+
+            println!(
+                "PING ({}) {}({}) bytes of data",
+                host_addr, ICMP_PACKET_SIZE, IP_PACKET_SIZE
+            );
+
             // Send ICMP echo request packet in a loop
-            let mut seq_num = 0;
             loop {
-                let mut icmp_packet = MutableIcmpPacket::new(&mut icmp_buf).unwrap();
-                // Set ICMP fields
-                // Type
-                icmp_packet.set_icmp_type(IcmpType(ICMP_ECHO_REQUEST));
-                // Timestamp in header field
-                let now = Instant::now();
-                let diff = (now - start).as_millis();
-                // Payload
-                let icmp_payload = IcmpPayload {
-                    identifier,
-                    seq_num,
-                    timestamp: diff as u32,
-                };
-                let icmp_payload_bytes = icmp_payload.into_bytes();
+                // Set payload and checksum (ICMP)
+                let icmp_payload_bytes = icmp_payload.to_bytes();
                 icmp_packet.set_payload(&icmp_payload_bytes);
-                // Checksum
                 icmp_packet.set_checksum(icmp::checksum(&icmp_packet.to_immutable()));
 
-                let mut ip_packet = MutableIpv4Packet::new(&mut ip_buf).unwrap();
-                // Set IP fields
-                // Version
-                ip_packet.set_version(IPV4_VERSION);
-                // Header len
-                ip_packet.set_header_length((IP_HDR_SIZE / 4) as u8);
-                // Total length
-                ip_packet.set_total_length(IP_PACKET_SIZE as u16);
-                // TTL
-                ip_packet.set_ttl(TTL);
-                // Protocol
-                ip_packet.set_next_level_protocol(IpNextHeaderProtocol(ICMP_PROTOCOL));
-                // Addresses
+                // Set payload and checksum (IP)
+                ip_packet.set_payload(icmp_packet.packet());
+                ip_packet.set_checksum(ipv4::checksum(&ip_packet.to_immutable()));
+
+                if let Err(err) =
+                    send_socket.send_to(ip_packet.packet(), &SocketAddrV4::new(host_addr, 0).into())
+                {
+                    eprintln!("Error while sending: {}", err);
+                }
 
                 // Sleep for 1 second
                 thread::sleep(sleep_time);
-                seq_num += 1;
+
+                // For next packet
+                icmp_payload.seq_num += 1;
+                let now = Instant::now();
+                let diff = (now - start).as_millis();
+                icmp_payload.timestamp = diff as u32;
             }
         });
     })
@@ -134,8 +148,8 @@ struct IcmpPayload {
 impl IcmpPayload {
     const SIZE: usize = mem::size_of::<IcmpPayload>();
 
-    fn into_bytes(self) -> [u8; IcmpPayload::SIZE] {
-        unsafe { mem::transmute(self) }
+    fn to_bytes(&self) -> [u8; IcmpPayload::SIZE] {
+        unsafe { mem::transmute_copy(self) }
     }
 }
 
