@@ -2,6 +2,7 @@
 name = "ping"
 version = "0.1.0"
 edition = "2021"
+authors = ["Deep Majumder <deep.majumder2019@gmail.com>"]
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
@@ -10,3 +11,4 @@ crossbeam = "0.8.1"
 pnet = "0.29.0"
 socket2 = { version = "0.4.4", features = ["all"] }
 thiserror = "1.0.30"
+rand = "0.8.5"

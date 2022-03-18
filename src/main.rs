@@ -1,26 +1,29 @@
-use std::sync::Mutex;
-use std::thread;
 use std::time::{Duration, Instant};
+use std::{mem, thread};
 
 use pnet::packet::icmp::{self, IcmpType, MutableIcmpPacket};
+use pnet::packet::ip::IpNextHeaderProtocol;
 use pnet::packet::ipv4::MutableIpv4Packet;
 use socket2::{Domain, Protocol, Socket, Type};
 use thiserror::Error;
 
 const ICMP_ECHO_REQUEST: u8 = 8;
 const IPV4_VERSION: u8 = 4;
+const TTL: u8 = 8;
+const ICMP_PROTOCOL: u8 = 1;
 
 fn main() {
-    let socket = unwrap_result(get_socket());
     let start = Instant::now();
+    let identifier = rand::random::<u16>();
 
     // This scope is to spawn a thread which sends ICMP echo requests at regular intervals
     crossbeam::scope(|s| {
         s.spawn(|_| {
+            let send_socket = unwrap_result(get_socket());
+
             // Calculate buffer size for packet
             const ICMP_HEADER_SIZE: usize = MutableIcmpPacket::minimum_packet_size();
-            const ICMP_PAYLOAD_SIZE: usize = 64; // For timestamp
-            const ICMP_PACKET_SIZE: usize = ICMP_HEADER_SIZE + ICMP_PAYLOAD_SIZE;
+            const ICMP_PACKET_SIZE: usize = ICMP_HEADER_SIZE + IcmpPayload::SIZE;
             const IP_HDR_SIZE: usize = MutableIpv4Packet::minimum_packet_size();
             const IP_PACKET_SIZE: usize = ICMP_PACKET_SIZE + IP_HDR_SIZE;
 
@@ -31,6 +34,7 @@ fn main() {
             let sleep_time = Duration::from_secs(SLEEP_TIME_SECS);
 
             // Send ICMP echo request packet in a loop
+            let mut seq_num = 0;
             loop {
                 let mut icmp_packet = MutableIcmpPacket::new(&mut icmp_buf).unwrap();
                 // Set ICMP fields
@@ -39,7 +43,14 @@ fn main() {
                 // Timestamp in header field
                 let now = Instant::now();
                 let diff = (now - start).as_millis();
-                icmp_packet.set_payload(&diff.to_ne_bytes());
+                // Payload
+                let icmp_payload = IcmpPayload {
+                    identifier,
+                    seq_num,
+                    timestamp: diff as u32,
+                };
+                let icmp_payload_bytes = icmp_payload.into_bytes();
+                icmp_packet.set_payload(&icmp_payload_bytes);
                 // Checksum
                 icmp_packet.set_checksum(icmp::checksum(&icmp_packet.to_immutable()));
 
@@ -51,18 +62,25 @@ fn main() {
                 ip_packet.set_header_length((IP_HDR_SIZE / 4) as u8);
                 // Total length
                 ip_packet.set_total_length(IP_PACKET_SIZE as u16);
+                // TTL
+                ip_packet.set_ttl(TTL);
+                // Protocol
+                ip_packet.set_next_level_protocol(IpNextHeaderProtocol(ICMP_PROTOCOL));
+                // Addresses
 
                 // Sleep for 1 second
                 thread::sleep(sleep_time);
+                seq_num += 1;
             }
         });
     })
     .unwrap();
 }
 
-fn get_socket() -> PingResult<Mutex<Socket>> {
+fn get_socket() -> PingResult<Socket> {
     let socket = Socket::new(Domain::IPV4, Type::RAW, Some(Protocol::ICMPV4))?;
-    Ok(Mutex::new(socket))
+    socket.set_header_included(true)?;
+    Ok(socket)
 }
 
 #[derive(Error, Debug)]
@@ -80,5 +98,21 @@ fn unwrap_result<O>(val: PingResult<O>) -> O {
             eprintln!("Error: {}", e);
             std::process::exit(1);
         }
+    }
+}
+
+#[repr(C)]
+#[derive(Debug)]
+struct IcmpPayload {
+    identifier: u16,
+    seq_num: u16,
+    timestamp: u32,
+}
+
+impl IcmpPayload {
+    const SIZE: usize = mem::size_of::<IcmpPayload>();
+
+    fn into_bytes(self) -> [u8; IcmpPayload::SIZE] {
+        unsafe { mem::transmute(self) }
     }
 }
