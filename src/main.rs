@@ -125,9 +125,12 @@ fn main() {
             let now = Instant::now();
             let now_from_start = (now - start).as_millis() as u32;
             let time_for_reply = now_from_start - icmp_payload.timestamp;
+
+            let host_name = reverse_lookup(host_addr).unwrap_or_default();
             println!(
-                "{} bytes from {}: icmp_seq={} ttl={} time={} ms",
+                "{} bytes from {} ({}): icmp_seq={} ttl={} time={} ms",
                 icmp_buf.len(),
+                host_name,
                 host_addr,
                 icmp_payload.seq_num,
                 ip_packet.get_ttl(),
@@ -157,6 +160,9 @@ enum PingError {
 
     #[error("Failed to find IPv4 address")]
     NoIpv4Addr,
+
+    #[error("No name for IPv4 address")]
+    NoNameFound,
 }
 
 type PingResult<O> = Result<O, PingError>;
@@ -241,7 +247,7 @@ impl<'a> PingArg<'a> {
             PingArg::Host(host) => {
                 let resolver = Resolver::new(ResolverConfig::default(), ResolverOpts::default())?;
                 let response = resolver.lookup_ip(*host)?;
-                for ip_addr in response.iter() {
+                for ip_addr in response {
                     if let IpAddr::V4(ipv4_addr) = ip_addr {
                         return Ok(ipv4_addr);
                     }
@@ -251,4 +257,13 @@ impl<'a> PingArg<'a> {
             PingArg::Ip(ip) => Ok(Ipv4Addr::from_str(ip)?),
         }
     }
+}
+
+fn reverse_lookup(ipv4: Ipv4Addr) -> PingResult<String> {
+    let resolver = Resolver::new(ResolverConfig::default(), ResolverOpts::default())?;
+    let response = resolver.reverse_lookup(IpAddr::V4(ipv4))?;
+    if let Some(name) = response.into_iter().next() {
+        return Ok(name.to_string());
+    }
+    Err(PingError::NoNameFound)
 }
